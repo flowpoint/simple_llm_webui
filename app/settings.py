@@ -9,7 +9,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "base_url": "http://localhost:8080/v1/chat/completions",
         "api_key": "",
         "model": "ggml-model-q4",
-        "temperature": 0.2,
     },
     "agents": [
         {
@@ -17,24 +16,32 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "description": "Default helper for broad tasks.",
             "system_prompt": "You are a general purpose assistant.",
             "model": "ggml-model-q4",
+            "temperature": 0.2,
+            "context_size": 4096,
         },
         {
             "name": "Researcher",
             "description": "Summarise findings concisely with citations when possible.",
             "system_prompt": "You are a research assistant who cites credible evidence briefly.",
             "model": "ggml-model-q4",
+            "temperature": 0.2,
+            "context_size": 4096,
         },
         {
             "name": "Debugger",
             "description": "Diagnose and fix software issues step by step.",
             "system_prompt": "You analyse logs and code to find defects and explain fixes.",
             "model": "ggml-model-q4",
+            "temperature": 0.2,
+            "context_size": 4096,
         },
         {
             "name": "Creative Writer",
             "description": "Produce imaginative prose or dialogue with vivid details.",
             "system_prompt": "You craft creative writing with strong imagery and pacing.",
             "model": "ggml-model-q4",
+            "temperature": 0.2,
+            "context_size": 4096,
         },
     ],
 }

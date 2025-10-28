@@ -96,9 +96,19 @@ class TaskService:
         self._process = None
 
     def enqueue_completion(
-        self, conversation_id: str, agent: str, model: Optional[str] = None
+        self,
+        conversation_id: str,
+        agent: str,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        context_size: Optional[int] = None,
     ) -> str:
-        payload = {"agent": agent, "model": model}
+        payload = {
+            "agent": agent,
+            "model": model,
+            "temperature": temperature,
+            "context_size": context_size,
+        }
         return self.enqueue_raw(
             kind="completion",
             priority=PRIORITY_NORMAL,
@@ -331,6 +341,8 @@ def _worker_main(
                     settings=settings,
                     agent_name=task_payload.get("agent"),
                     model_override=task_payload.get("model"),
+                    temperature_override=task_payload.get("temperature"),
+                    context_size_override=task_payload.get("context_size"),
                 )
                 result["requires_summary"] = True
             elif kind == "summarize":
@@ -474,11 +486,35 @@ def _handle_completion(
     settings: Dict[str, Any],
     agent_name: Optional[str] = None,
     model_override: Optional[str] = None,
+    temperature_override: Optional[float] = None,
+    context_size_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     conversation = conversation_store.load_conversation(conversation_id)
     if not conversation:
         raise LlamaCppError("Conversation is empty.")
-    temperature = settings["llama_cpp"].get("temperature", 0.2)
+    agent_settings = next(
+        (
+            agent
+            for agent in settings.get("agents", [])
+            if agent.get("name") == agent_name
+        ),
+        settings.get("agents", [{}])[0] if settings.get("agents") else {},
+    )
+    default_agent = settings.get("agents", [{}])[0] if settings.get("agents") else {}
+    temperature = (
+        temperature_override
+        if temperature_override is not None
+        else agent_settings.get(
+            "temperature", default_agent.get("temperature", 0.2)
+        )
+    )
+    context_size = (
+        context_size_override
+        if context_size_override is not None
+        else agent_settings.get(
+            "context_size", default_agent.get("context_size", 4096)
+        )
+    )
     tools = registry.definitions() or None
     iterations = 0
     max_iterations = 4
@@ -506,11 +542,12 @@ def _handle_completion(
             model=model_name,
             messages=messages,
             temperature=temperature,
+            max_tokens=context_size,
             tools=tools,
         )
         choice = (response.get("choices") or [{}])[0]
         assistant_message = choice.get("message") or {}
-        text, reasoning = unpack_assistant_message(assistant_message)
+        text, reasoning, reasoning_content = unpack_assistant_message(assistant_message)
         tool_calls = assistant_message.get("tool_calls") or []
         formatted_calls = []
         for call in tool_calls:
@@ -536,6 +573,7 @@ def _handle_completion(
                 "model": model_name,
                 "text": text,
                 "reasoning": reasoning,
+                "reasoning_content": reasoning_content,
                 "tool_calls": formatted_calls,
             },
         }

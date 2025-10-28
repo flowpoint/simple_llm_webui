@@ -7,10 +7,11 @@ import re
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 from fastapi import FastAPI, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+import requests
 
 from .settings import DEFAULT_SETTINGS, SettingsManager
 from .storage import ConversationStore, IndexStore, build_title
@@ -20,6 +21,7 @@ from .templates import (
     render_conversation_messages,
     render_dashboard,
     render_task_strip,
+    render_settings_page,
     render_help_page,
 )
 
@@ -63,6 +65,7 @@ idle_monitor = IdleMonitor(timeout_seconds=30)
 idle_task: Optional[asyncio.Task] = None
 
 app_state: Dict[str, bool] = {"idle": False}
+llama_status: Dict[str, str] = {"state": "warn", "label": "LLM Unknown"}
 
 
 def _ensure_agents() -> List[Dict]:
@@ -77,16 +80,32 @@ def _ensure_agents() -> List[Dict]:
                 {
                     "name": f"Agent {len(combined) + 1}",
                     "description": "",
-                    "system_prompt": settings_manager.settings["system_prompt"],
-                    "model": settings_manager.settings["llama_cpp"]["model"],
+                    "system_prompt": settings_manager.settings.get(
+                        "system_prompt", DEFAULT_SETTINGS["system_prompt"]
+                    ),
+                    "model": settings_manager.settings.get("llama_cpp", {}).get(
+                        "model", DEFAULT_SETTINGS["llama_cpp"]["model"]
+                    ),
+                    "temperature": DEFAULT_SETTINGS["agents"][0]["temperature"],
+                    "context_size": DEFAULT_SETTINGS["agents"][0]["context_size"],
                 }
             )
         agents = combined[:4]
     alias_counts: Dict[str, int] = {}
+    default_prompt = settings_manager.settings.get(
+        "system_prompt", DEFAULT_SETTINGS["system_prompt"]
+    )
+    default_model = settings_manager.settings.get("llama_cpp", {}).get(
+        "model", DEFAULT_SETTINGS["llama_cpp"]["model"]
+    )
+    default_temperature = DEFAULT_SETTINGS["agents"][0]["temperature"]
+    default_context = DEFAULT_SETTINGS["agents"][0]["context_size"]
     for index, agent in enumerate(agents):
         agent.setdefault("description", "")
-        agent.setdefault("system_prompt", settings_manager.settings["system_prompt"])
-        agent.setdefault("model", settings_manager.settings["llama_cpp"]["model"])
+        agent.setdefault("system_prompt", default_prompt)
+        agent.setdefault("model", default_model)
+        agent.setdefault("temperature", default_temperature)
+        agent.setdefault("context_size", default_context)
         alias = agent.get("alias")
         if not alias:
             alias = re.sub(r"[^a-z0-9]+", "-", agent["name"].lower()).strip("-")
@@ -105,11 +124,15 @@ def _ensure_agents() -> List[Dict]:
 def _status_context() -> Dict[str, str]:
     worker_alive = task_service.worker_alive()
     idle = app_state.get("idle", False)
+    llama_state = llama_status.get("state", "warn")
+    llama_label = llama_status.get("label", "LLM Unknown")
     return {
         "worker_state": "ok" if worker_alive else "warn",
         "worker_label": "online" if worker_alive else "offline",
         "idle_state": "warn" if idle else "ok",
         "idle_label": "Idle" if idle else "Active",
+        "llama_state": llama_state,
+        "llama_label": llama_label,
     }
 
 
@@ -121,6 +144,16 @@ def _schedule_missing_summaries() -> None:
             task_service.mark_summary_needed(meta.conversation_id)
     for conversation_id in task_service.pending_summary_ids():
         task_service.enqueue_summary(conversation_id)
+
+
+def _llama_health_url() -> Optional[str]:
+    base_url = settings_manager.settings.get("llama_cpp", {}).get("base_url")
+    if not base_url:
+        return None
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return urlunparse((parsed.scheme, parsed.netloc, "/health", "", "", ""))
 
 
 def _collect_view_state(
@@ -191,6 +224,10 @@ def _collect_view_state(
             else:
                 reward_map[target] = reward
 
+    visible_entries = [entry for entry in entries if entry.get("type") != "label"]
+    entry_ids = [entry.get("id") for entry in visible_entries if entry.get("id")]
+    last_entry_id = entry_ids[-1] if entry_ids else None
+
     status = _status_context()
     agents = _ensure_agents()
     tasks = task_service.snapshot()
@@ -208,12 +245,51 @@ def _collect_view_state(
         "conversation_title": active_title or "Conversation",
         "history": history,
         "entries": entries,
+        "entry_ids": entry_ids,
+        "last_entry_id": last_entry_id,
         "reward_map": reward_map,
         "tool_reward_map": tool_reward_map,
         "status": status,
         "agents": agents,
         "tasks": tasks,
     }
+
+
+def _render_tasks_html(tasks: List[Any]) -> str:
+    completed = [task for task in tasks if task.status == "completed"]
+    queued = [task for task in tasks if task.status != "completed"]
+    completed.sort(key=lambda rec: rec.updated_at, reverse=True)
+    recent_completed = completed[:2]
+    recent_completed.sort(key=lambda rec: getattr(rec, "created_at", rec.updated_at))
+    queued.sort(key=lambda rec: (rec.priority, rec.updated_at))
+    completed_placeholder = (
+        "<div class=\"task-lane completed empty\">"
+        "<div class=\"task-strip\">"
+        "<div class=\"task-card placeholder\"><p>No finished tasks.</p></div>"
+        "</div>"
+        "</div>"
+    )
+    queued_placeholder = (
+        "<div class=\"task-lane queued empty\">"
+        "<div class=\"task-strip\">"
+        "<div class=\"task-card placeholder\"><p>No queued tasks.</p></div>"
+        "</div>"
+        "</div>"
+    )
+
+    completed_html = render_task_strip(
+        recent_completed,
+        css_class="completed",
+        empty_html=completed_placeholder,
+    )
+    queued_html = render_task_strip(
+        queued,
+        css_class="queued",
+        empty_html=queued_placeholder,
+    )
+
+    parts = [completed_html, "<div class=\"task-divider\"></div>", queued_html]
+    return "\n".join(parts)
 
 
 @app.on_event("startup")
@@ -253,10 +329,10 @@ async def dashboard(request: Request, conversation: Optional[str] = None) -> HTM
         conversations=state["history"],
         active_conversation=state["active_conversation"],
         conversation_entries=state["entries"],
+        entry_ids=state["entry_ids"],
         reward_map=state["reward_map"],
         tool_reward_map=state["tool_reward_map"],
         conversation_title=state["conversation_title"],
-        settings=settings_manager.settings,
         agents=state["agents"],
         tasks=state["tasks"],
         status=state["status"],
@@ -271,8 +347,14 @@ async def new_conversation() -> RedirectResponse:
     default_agent = agents[0]
     conversation_id = conversation_store.create_conversation(
         agent=default_agent.get("name", "General"),
-        system_prompt=default_agent.get("system_prompt", settings_manager.settings["system_prompt"]),
-        model=default_agent.get("model", settings_manager.settings["llama_cpp"]["model"]),
+        system_prompt=default_agent.get(
+            "system_prompt", settings_manager.settings.get("system_prompt", DEFAULT_SETTINGS["system_prompt"])
+        ),
+        model=default_agent.get(
+            "model", settings_manager.settings.get("llama_cpp", {}).get("model", DEFAULT_SETTINGS["llama_cpp"]["model"])
+        ),
+        temperature=default_agent.get("temperature", 0.2),
+        context_size=default_agent.get("context_size", 4096),
     )
     index_store.record_access(conversation_id)
     logger.info(
@@ -290,18 +372,30 @@ async def new_conversation() -> RedirectResponse:
 async def send_message(
     conversation_id: str,
     request: Request,
-) -> RedirectResponse:
+) -> Response:
     idle_monitor.touch()
+    accepts_json = "application/json" in (request.headers.get("accept", "").lower())
+
     body_bytes = await request.body()
     form_data = parse_qs(body_bytes.decode("utf-8"))
     raw_prompt = (form_data.get("prompt") or [""])[-1]
     if not raw_prompt or not raw_prompt.strip():
+        if accepts_json:
+            return JSONResponse(
+                {"ok": False, "error": "Prompt must not be empty."},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         return RedirectResponse(
             url=f"/?conversation={conversation_id}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
     entries = conversation_store.load_conversation(conversation_id)
     if not entries:
+        if accepts_json:
+            return JSONResponse(
+                {"ok": False, "error": "Conversation not found."},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
         return RedirectResponse(
             url=f"/?conversation={conversation_id}",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -350,14 +444,23 @@ async def send_message(
         else:
             prompt_text = raw_prompt.strip()
     if not prompt_text:
+        if accepts_json:
+            return JSONResponse(
+                {"ok": False, "error": "Prompt must not be empty."},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
         return RedirectResponse(
             url=f"/?conversation={conversation_id}",
             status_code=status.HTTP_303_SEE_OTHER,
         )
+    selected_temp = selected.get("temperature", 0.2)
+    selected_ctx = selected.get("context_size", 4096)
     if (
         last_content.get("system_prompt") != system_prompt
         or last_content.get("agent") != selected.get("name")
         or last_content.get("model") != model_name
+        or last_content.get("temperature") != selected_temp
+        or last_content.get("context_size") != selected_ctx
     ):
         conversation_store.append_entry(
             conversation_id,
@@ -368,6 +471,8 @@ async def send_message(
                     "system_prompt": system_prompt,
                     "agent": selected.get("name"),
                     "model": model_name,
+                    "temperature": selected_temp,
+                    "context_size": selected_ctx,
                 },
             },
         )
@@ -379,7 +484,15 @@ async def send_message(
         model_name,
     )
     task_service.mark_summary_needed(conversation_id)
-    task_service.enqueue_completion(conversation_id, selected.get("name"), model_name)
+    task_service.enqueue_completion(
+        conversation_id,
+        selected.get("name"),
+        model_name,
+        temperature=selected_temp,
+        context_size=selected_ctx,
+    )
+    if accepts_json:
+        return JSONResponse({"ok": True, "conversation_id": conversation_id})
     return RedirectResponse(
         url=f"/?conversation={conversation_id}",
         status_code=status.HTTP_303_SEE_OTHER,
@@ -417,6 +530,16 @@ async def label_message(
     )
 
 
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page() -> HTMLResponse:
+    html = render_settings_page(
+        settings_manager.settings,
+        _ensure_agents(),
+        _status_context(),
+    )
+    return HTMLResponse(html)
+
+
 @app.post("/settings")
 async def update_settings(request: Request) -> RedirectResponse:
     idle_monitor.touch()
@@ -437,6 +560,8 @@ async def update_settings(request: Request) -> RedirectResponse:
     }
     agents: List[Dict] = []
     for idx, default_agent in enumerate(_ensure_agents()):
+        default_temp = default_agent.get("temperature", 0.2)
+        default_ctx = default_agent.get("context_size", 4096)
         agents.append(
             {
                 "name": get_field(f"agents_{idx}_name", default_agent["name"]),
@@ -445,13 +570,27 @@ async def update_settings(request: Request) -> RedirectResponse:
                 "model": get_field(
                     f"agents_{idx}_model", default_agent.get("model", llama["model"])
                 ),
+                "temperature": float(
+                    get_field(
+                        f"agents_{idx}_temperature", str(default_temp)
+                    )
+                    or default_temp
+                ),
+                "context_size": int(
+                    get_field(
+                        f"agents_{idx}_context", str(default_ctx)
+                    )
+                    or default_ctx
+                ),
             }
         )
     payload = {
-        "system_prompt": get_field("system_prompt", settings_manager.settings["system_prompt"]),
         "llama_cpp": llama,
         "agents": agents,
     }
+    if agents:
+        payload["system_prompt"] = agents[0]["system_prompt"]
+        llama["temperature"] = agents[0].get("temperature", 0.2)
     settings_manager.save(payload)
     logger.info(
         "Settings updated base_url=%s default_model=%s agents=%s",
@@ -459,7 +598,7 @@ async def update_settings(request: Request) -> RedirectResponse:
         llama["model"],
         ", ".join(agent["name"] for agent in agents),
     )
-    return RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(url="/settings", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.get("/help", response_class=HTMLResponse)
@@ -467,6 +606,25 @@ async def help_page() -> HTMLResponse:
     agents = _ensure_agents()
     html = render_help_page(agents)
     return HTMLResponse(html)
+
+
+@app.get("/health/llama", response_class=JSONResponse)
+async def llama_health() -> JSONResponse:
+    health_url = _llama_health_url()
+    if not health_url:
+        llama_status["state"] = "warn"
+        llama_status["label"] = "LLM Unknown"
+        return JSONResponse({"status": "warn", "label": "LLM Unknown"})
+    try:
+        response = requests.get(health_url, timeout=3)
+        ok = response.status_code < 400
+    except requests.RequestException:
+        ok = False
+    status = "ok" if ok else "warn"
+    label = "LLM Connected" if ok else "LLM Offline"
+    llama_status["state"] = status
+    llama_status["label"] = label
+    return JSONResponse({"status": status, "label": label})
 
 
 @app.get("/state", response_class=JSONResponse)
@@ -483,13 +641,15 @@ async def state_endpoint(conversation: Optional[str] = None) -> JSONResponse:
             state["tool_reward_map"],
             state["active_conversation"],
         ),
-        "tasks_html": render_task_strip(state["tasks"]),
+        "tasks_html": _render_tasks_html(state["tasks"]),
         "conversation_title": state["conversation_title"],
         "active_conversation": state["active_conversation"],
         "status": state["status"],
         "agents": [
             agent.get("alias") for agent in state["agents"] if agent.get("alias")
         ],
+        "entry_ids": state["entry_ids"],
+        "last_entry_id": state["last_entry_id"],
     }
     return JSONResponse(payload)
 

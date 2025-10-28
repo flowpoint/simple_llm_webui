@@ -49,7 +49,15 @@ class ConversationStore:
         self.root = root / "conversations"
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def create_conversation(self, *, agent: str, system_prompt: str, model: str) -> str:
+    def create_conversation(
+        self,
+        *,
+        agent: str,
+        system_prompt: str,
+        model: str,
+        temperature: float,
+        context_size: int,
+    ) -> str:
         conversation_id = uuid4().hex
         path = self._conversation_path(conversation_id)
         metadata_entry = {
@@ -61,6 +69,8 @@ class ConversationStore:
                 "agent": agent,
                 "system_prompt": system_prompt,
                 "model": model,
+                "temperature": temperature,
+                "context_size": context_size,
             },
         }
         _append_jsonl(path, metadata_entry)

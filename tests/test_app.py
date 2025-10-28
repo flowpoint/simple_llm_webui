@@ -1,9 +1,12 @@
 import multiprocessing
+import random
 import socket
+import string
 import time
 from pathlib import Path
 from typing import Tuple
 import sys
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
@@ -160,3 +163,121 @@ def test_dashboard_served(http_session: Tuple[requests.Session, str]) -> None:
     response = session.get(base_url, timeout=2)
     assert response.status_code == 200
     assert "Minimal LLM WebUI" in response.text
+
+
+def _random_prompt(aliases: list[str]) -> str:
+    body = "".join(random.choice(string.ascii_letters + string.digits + " .,?!") for _ in range(random.randint(5, 80)))
+    if aliases and random.random() < 0.5:
+        return f"@{random.choice(aliases)} {body}"
+    return body
+
+
+def _random_settings_payload(base_url: str, aliases: list[str]) -> dict[str, str]:
+    data: dict[str, str] = {
+        "llama_base_url": f"http://localhost:{random.randint(1000, 65000)}/api",
+        "llama_api_key": _random_text(24),
+        "llama_model": _random_text(12),
+    }
+    # ensure four agents worth of data
+    for idx in range(4):
+        data[f"agents_{idx}_name"] = _random_text(10)
+        data[f"agents_{idx}_description"] = _random_text(20)
+        data[f"agents_{idx}_model"] = _random_text(8)
+        data[f"agents_{idx}_prompt"] = _random_text(60)
+        data[f"agents_{idx}_temperature"] = f"{random.uniform(0.0, 1.5):.2f}"
+        data[f"agents_{idx}_context"] = str(random.randint(1024, 8192))
+    return data
+
+
+def _random_text(length: int) -> str:
+    alphabet = string.ascii_letters + string.digits + " -_.,?"
+    return "".join(random.choice(alphabet) for _ in range(random.randint(0, length)))
+
+
+def test_ui_fuzz(http_session: Tuple[requests.Session, str]) -> None:
+    random.seed(1)
+    session, base_url = http_session
+    base = base_url.rstrip("/")
+
+    # start a conversation
+    resp = session.post(f"{base}/conversation/new", timeout=3)
+    assert resp.status_code < 500
+    conversation_id = None
+    if resp.history:
+        final_url = resp.url
+    else:
+        final_url = resp.request.url
+    query = parse_qs(urlparse(final_url).query)
+    conversation_id = (query.get("conversation") or [None])[0]
+    if not conversation_id:
+        state = session.get(f"{base}/state", timeout=3).json()
+        conversation_id = state.get("active_conversation")
+    assert conversation_id, "Failed to initialise conversation for fuzz tests"
+
+    def refresh_aliases() -> list[str]:
+        resp_state = session.get(
+            f"{base}/state", params={"conversation": conversation_id}, timeout=3
+        )
+        assert resp_state.status_code < 500
+        data = resp_state.json()
+        return data.get("agents", []) or []
+
+    aliases = refresh_aliases()
+
+    actions = [
+        "get_root",
+        "get_conversation",
+        "get_status",
+        "get_state",
+        "get_help",
+        "get_llama_health",
+        "post_message",
+        "post_settings",
+    ]
+
+    for _ in range(25):
+        action = random.choice(actions)
+        if action == "get_root":
+            resp = session.get(base, timeout=3)
+            assert resp.status_code < 500
+            assert "<!DOCTYPE html>" in resp.text
+        elif action == "get_conversation":
+            resp = session.get(f"{base}/", params={"conversation": conversation_id}, timeout=3)
+            assert resp.status_code < 500
+        elif action == "get_status":
+            resp = session.get(f"{base}/status", timeout=3)
+            assert resp.status_code < 500
+            data = resp.json()
+            assert "worker_state" in data
+        elif action == "get_state":
+            resp = session.get(
+                f"{base}/state", params={"conversation": conversation_id}, timeout=3
+            )
+            assert resp.status_code < 500
+            data = resp.json()
+            assert data.get("active_conversation") == conversation_id
+        elif action == "get_help":
+            resp = session.get(f"{base}/help", timeout=3)
+            assert resp.status_code < 500
+            assert "WebUI Quick Reference" in resp.text
+        elif action == "get_llama_health":
+            resp = session.get(f"{base}/health/llama", timeout=3)
+            assert resp.status_code < 500
+            data = resp.json()
+            assert "status" in data
+        elif action == "post_message":
+            prompt = _random_prompt(aliases)
+            resp = session.post(
+                f"{base}/conversation/{conversation_id}/send",
+                data={"prompt": prompt},
+                timeout=5,
+            )
+            assert resp.status_code < 500
+            aliases = refresh_aliases()
+        elif action == "post_settings":
+            payload = _random_settings_payload(base, aliases)
+            resp = session.post(f"{base}/settings", data=payload, timeout=5)
+            assert resp.status_code < 500
+            aliases = refresh_aliases()
+        else:
+            raise AssertionError(f"Unknown action {action}")

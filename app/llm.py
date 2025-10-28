@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
+import json
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
@@ -83,6 +84,7 @@ class LlamaCppClient:
         temperature: float = 0.2,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model,
@@ -94,6 +96,8 @@ class LlamaCppClient:
             payload["tools"] = tools
         if tool_choice:
             payload["tool_choice"] = tool_choice
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -115,43 +119,118 @@ class LlamaCppClient:
             raise LlamaCppError("Failed to decode llama.cpp response as JSON.") from exc
 
 
-def unpack_assistant_message(message: Dict[str, Any]) -> Tuple[str, List[str]]:
+def unpack_assistant_message(message: Dict[str, Any]) -> Tuple[str, List[str], List[str]]:
     """
-    Normalise assistant payloads into readable text and reasoning snippets.
+    Normalise assistant payloads into readable text, reasoning snippets, and
+    structured reasoning content emitted by llama.cpp.
     """
     reasoning_segments: List[str] = []
     text_segments: List[str] = []
+
+    chain_pattern = re.compile(r"<(think|reasoning|thought)>(.*?)</\\1>", re.IGNORECASE | re.DOTALL)
+
+    def strip_chain_markup(text: str) -> str:
+        if not text:
+            return ""
+
+        def _capture(match: re.Match[str]) -> str:
+            snippet = (match.group(2) or "").strip()
+            if snippet:
+                reasoning_segments.append(snippet)
+            return ""
+
+        cleaned = chain_pattern.sub(_capture, text)
+        return cleaned
+
+    def append_reasoning(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                reasoning_segments.append(cleaned)
+            return
+        if isinstance(value, dict):
+            append_reasoning(value.get("text") or value.get("content"))
+            return
+        if isinstance(value, list):
+            for item in value:
+                append_reasoning(item)
+            return
+        reasoning_segments.append(str(value))
 
     content = message.get("content")
     if isinstance(content, list):
         for block in content:
             if not isinstance(block, dict):
-                text_segments.append(str(block))
+                cleaned = strip_chain_markup(str(block))
+                if cleaned.strip():
+                    text_segments.append(cleaned.strip())
                 continue
             block_type = block.get("type")
             if block_type in {"reasoning", "analysis"}:
-                reasoning_segments.append(str(block.get("text") or block.get("content") or ""))
+                append_reasoning(block.get("text") or block.get("content"))
             elif block_type == "text":
-                text_segments.append(block.get("text", ""))
+                cleaned = strip_chain_markup(block.get("text", ""))
+                if cleaned.strip():
+                    text_segments.append(cleaned.strip())
             elif block_type == "tool_call":
                 # tool calls are handled separately by the worker
                 continue
             else:
-                text_segments.append(json.dumps(block))
+                cleaned = strip_chain_markup(json.dumps(block))
+                if cleaned.strip():
+                    text_segments.append(cleaned.strip())
     elif isinstance(content, str):
-        text_segments.append(content)
+        cleaned = strip_chain_markup(content)
+        if cleaned.strip():
+            text_segments.append(cleaned.strip())
     elif content is None:
         pass
     else:
-        text_segments.append(json.dumps(content))
+        cleaned = strip_chain_markup(json.dumps(content))
+        if cleaned.strip():
+            text_segments.append(cleaned.strip())
 
     # Some llama.cpp variants return a dedicated 'reasoning' field.
     reasoning_field = message.get("reasoning")
-    if isinstance(reasoning_field, str) and reasoning_field.strip():
-        reasoning_segments.append(reasoning_field)
+    append_reasoning(reasoning_field)
+
+    def normalise_reasoning_content(value: Any) -> List[str]:
+        normalised: List[str] = []
+
+        def _collect(item: Any) -> None:
+            if item is None:
+                return
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    normalised.append(text)
+                return
+            if isinstance(item, dict):
+                for key in ("text", "content", "message"):
+                    if key in item:
+                        _collect(item[key])
+                        return
+                try:
+                    normalised.append(json.dumps(item, ensure_ascii=False))
+                except TypeError:
+                    normalised.append(str(item))
+                return
+            if isinstance(item, list):
+                for sub in item:
+                    _collect(sub)
+                return
+            normalised.append(str(item))
+
+        _collect(value)
+        return [entry for entry in normalised if entry.strip()]
+
+    reasoning_content = normalise_reasoning_content(message.get("reasoning_content"))
 
     text = "\n".join(segment for segment in text_segments if segment)
-    return text.strip(), [segment.strip() for segment in reasoning_segments if segment]
+    reasoning_output = [segment.strip() for segment in reasoning_segments if segment and segment.strip()]
+    return text.strip(), reasoning_output, reasoning_content
 
 
 def register_default_tools(registry: ToolRegistry) -> None:
