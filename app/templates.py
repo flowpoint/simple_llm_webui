@@ -19,6 +19,7 @@ def render_dashboard(
     agents: List[Dict],
     tasks: List[TaskRecord],
     status: Dict[str, str],
+    task_signature: List[List[str]],
 ) -> str:
     agent_names = [agent.get("alias", "") for agent in agents if agent.get("alias")]
     agents_json = escape(json.dumps(agent_names))
@@ -55,6 +56,7 @@ def render_dashboard(
     title_html = escape(conversation_title or "Conversation")
     entry_ids_json = escape(json.dumps(entry_ids))
     last_entry_id = escape(entry_ids[-1] if entry_ids else "")
+    task_signature_json = escape(json.dumps(task_signature))
 
     prompt_html = render_prompt_form(active_conversation, agents)
 
@@ -513,6 +515,18 @@ def render_dashboard(
     .task-lane.completed .task-strip {{
       max-width: calc(200px * 2 + 0.9rem);
     }}
+    .task-lane.completed.empty {{
+      flex: 0 0 calc(200px * 2 + 0.9rem);
+      max-width: calc(200px * 2 + 0.9rem);
+    }}
+    .task-lane.queued.empty {{
+      flex: 1 1 auto;
+      min-width: 0;
+    }}
+    .task-lane.empty .task-strip {{
+      justify-content: center;
+      max-width: 100%;
+    }}
     .task-divider {{
       flex: 0 0 4px;
       background: linear-gradient(
@@ -537,6 +551,8 @@ def render_dashboard(
       flex-direction: column;
       gap: 0.18rem;
       min-width: 0;
+      min-height: 120px;
+      margin: 0;
       overflow: hidden;
       box-sizing: border-box;
     }}
@@ -550,19 +566,29 @@ def render_dashboard(
       border-color: #36a536;
     }}
     .task-card h3 {{
-      margin: 0 0 0.35rem;
-      font-size: 0.85rem;
+      margin: 0 0 0.25rem;
+      font-size: 0.82rem;
+      line-height: 1.2;
+      max-height: 2.4em;
+      overflow: hidden;
       word-break: break-word;
     }}
     .task-card span {{
       color: var(--muted);
-      font-size: 0.72rem;
-      word-break: break-word;
+      font-size: 0.7rem;
       display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }}
     .task-card p {{
-      margin: 0.25rem 0 0;
-      font-size: 0.75rem;
+      margin: 0;
+      font-size: 0.72rem;
+      line-height: 1.25;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
       word-break: break-word;
     }}
     .task-lane.empty .task-card.placeholder {{
@@ -573,9 +599,40 @@ def render_dashboard(
       background: rgba(51, 103, 214, 0.08);
       color: var(--muted);
     }}
+    .task-card.placeholder {{
+      flex: 0 0 200px;
+      max-width: 200px;
+      min-height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+    }}
     .task-card.placeholder p {{
       margin: 0;
-      font-size: 0.78rem;
+      font-size: 0.74rem;
+      width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .task-action {{
+      margin-top: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.3rem 0.55rem;
+      border-radius: 6px;
+      border: 1px solid var(--accent);
+      background: rgba(51, 103, 214, 0.12);
+      font-size: 0.72rem;
+      color: #123e90;
+      text-decoration: none;
+      transition: background 0.15s ease;
+    }}
+    .task-action:hover {{
+      background: var(--accent);
+      color: #fff;
     }}
     .prompt-hint {{
       margin: 0.35rem 0 0;
@@ -677,10 +734,10 @@ def render_dashboard(
     </section>
     <section class="queue">
       <div class="queue-header">
-          <div class="queue-title">
-            <h2>Priority Queue</h2>
-            <div class="status-badges">
-              <div class="badge" id="worker-badge" data-state="{escape(status.get('worker_state', 'warn'))}">Worker {escape(status.get('worker_label', 'offline'))}</div>
+        <div class="queue-title">
+          <h2>Priority Queue</h2>
+          <div class="status-badges">
+            <div class="badge" id="worker-badge" data-state="{escape(status.get('worker_state', 'warn'))}">Worker {escape(status.get('worker_label', 'offline'))}</div>
               <div class="badge" id="idle-badge" data-state="{escape(status.get('idle_state', 'ok'))}">{escape(status.get('idle_label', 'Active'))}</div>
               <div class="badge" id="llama-badge" data-state="{escape(status.get('llama_state', 'warn'))}">{escape(status.get('llama_label', 'LLM Unknown'))}</div>
             </div>
@@ -690,7 +747,7 @@ def render_dashboard(
           <a class="help-button" href="/help" target="_blank" rel="noopener">Help</a>
         </div>
       </div>
-      <div class="task-area" id="task-strip">
+      <div class="task-area" id="task-strip" data-task-signature='{task_signature_json}'>
         {tasks_html}
       </div>
     </section>
@@ -851,9 +908,10 @@ def _render_entry(
             _render_tool_call(conversation_id, call, tool_reward_map)
             for call in tool_calls
         )
-        body_parts.append(f"<pre>{text}</pre>")
         if reasoning_html:
             body_parts.append(reasoning_html)
+        if text:
+            body_parts.append(f"<pre>{text}</pre>")
         if tool_html:
             body_parts.append(tool_html)
     elif etype == "tool_result":
@@ -939,11 +997,11 @@ def render_prompt_form(
         )
     return f"""
     <form method="post" action="/conversation/{conversation_id}/send" class="prompt">
+      <div class="mention-helper" id="mention-helper" hidden></div>
       <div class="prompt-row">
         <textarea name="prompt" placeholder="Type your message… (use @alias to target agents)" required data-agent-names='{suggestions}'></textarea>
         <button type="submit">Send</button>
       </div>
-      <div class="mention-helper" id="mention-helper" hidden></div>
       {hint}
     </form>
     """
@@ -1183,18 +1241,7 @@ def _render_task_card(task: TaskRecord) -> str:
     updated = escape(task.updated_at)
     detail_text = "" if task.detail is None else str(task.detail)
     preview = escape(detail_text[:80] + ("…" if detail_text and len(detail_text) > 80 else "")) if detail_text else ""
-    extra_payload = {
-        "id": task.id,
-        "kind": task.kind,
-        "priority": task.priority,
-        "status": task.status,
-        "conversation_id": task.conversation_id,
-        "created_at": task.created_at,
-        "updated_at": task.updated_at,
-        "description": task.description,
-        "detail": task.detail,
-    }
-    details_html = f"<details class=\"task-details\"><summary>Details</summary><pre>{escape(json.dumps(extra_payload, indent=2, default=str))}</pre></details>"
+    detail_link = f"/tasks/{escape(task.id)}"
     preview_html = f"<p>{preview}</p>" if preview else ""
     return f"""
     <article class="{' '.join(classes)}">
@@ -1204,7 +1251,7 @@ def _render_task_card(task: TaskRecord) -> str:
       <span>Conversation: {conversation}</span>
       <span>Updated: {updated}</span>
       {preview_html}
-      {details_html}
+      <a class="task-action" href="{detail_link}" target="_blank" rel="noopener">Open details</a>
     </article>
     """
 
@@ -1313,7 +1360,109 @@ def render_help_page(agents: List[Dict]) -> str:
       <li>Changes save immediately and feed the next request; use <code>@alias</code> to pick the agent inline.</li>
     </ul>
   </section>
-  <p><a href="/">Back to the WebUI</a></p>
+    <p><a href="/">Back to the WebUI</a></p>
+</body>
+</html>"""
+
+
+def render_task_detail_page(task: TaskRecord) -> str:
+    payload = {
+        "id": task.id,
+        "kind": task.kind,
+        "priority": task.priority,
+        "status": task.status,
+        "conversation_id": task.conversation_id,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "description": task.description,
+        "detail": task.detail,
+    }
+    pretty = escape(json.dumps(payload, indent=2, default=str))
+    title = escape(task.description or task.kind or task.id)
+    return f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <title>Task {title}</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --border: #ccd2e1;
+      --accent: #3367d6;
+      --muted: #5c647a;
+    }}
+    body {{
+      margin: 0;
+      padding: 2rem;
+      background: #f6f8fd;
+      color: #0f172a;
+    }}
+    main {{
+      max-width: 720px;
+      margin: 0 auto;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }}
+    h1 {{
+      margin-top: 0;
+      font-size: 1.4rem;
+      line-height: 1.3;
+    }}
+    dl {{
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      row-gap: 0.35rem;
+      column-gap: 1rem;
+      margin: 1rem 0 1.5rem;
+    }}
+    dt {{
+      font-weight: 600;
+      color: var(--muted);
+    }}
+    dd {{
+      margin: 0;
+    }}
+    pre {{
+      background: rgba(51, 103, 214, 0.08);
+      border: 1px solid rgba(51, 103, 214, 0.2);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow: auto;
+      font-size: 0.82rem;
+      line-height: 1.35;
+    }}
+    a.back {{
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.45rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.82rem;
+      margin-top: 1.25rem;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Task: {title}</h1>
+    <dl>
+      <dt>Status</dt><dd>{escape(task.status.title())}</dd>
+      <dt>Priority</dt><dd>{escape(_priority_label(task.priority))}</dd>
+      <dt>Conversation</dt><dd>{escape(task.conversation_id or '—')}</dd>
+      <dt>Created</dt><dd>{escape(task.created_at)}</dd>
+      <dt>Updated</dt><dd>{escape(task.updated_at)}</dd>
+    </dl>
+    <h2>Payload</h2>
+    <pre>{pretty}</pre>
+    <a class="back" href="/">← Back to dashboard</a>
+  </main>
 </body>
 </html>"""
 def _refresh_script() -> str:
@@ -1328,6 +1477,9 @@ def _refresh_script() -> str:
         const conversationHistory = document.getElementById('conversation-history');
         const conversationTitle = document.getElementById('conversation-title');
         const taskStrip = document.getElementById('task-strip');
+        if (taskStrip && taskStrip.dataset.taskSignature && !taskStrip.dataset.signature) {
+          taskStrip.dataset.signature = taskStrip.dataset.taskSignature;
+        }
         const promptForm = document.querySelector('form.prompt');
         const promptArea = promptForm ? promptForm.querySelector('textarea[name=\"prompt\"]') : null;
         const promptContainer = promptForm ? promptForm.closest('.prompt-container') : null;
@@ -1336,6 +1488,7 @@ def _refresh_script() -> str:
         let refreshTimeout = null;
         let sendingPrompt = false;
         let knownEntryIds = [];
+        let mentionActiveIndex = -1;
         let agentNames = [];
         function setAgentNames(names) {
           if (Array.isArray(names)) {
@@ -1385,7 +1538,20 @@ def _refresh_script() -> str:
 
         if (promptArea && mentionHelper) {
           promptArea.addEventListener('keydown', function(event){
+            if (!mentionHelper.hidden && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+              event.preventDefault();
+              moveMentionFocus(event.key === 'ArrowDown' ? 1 : -1);
+              return;
+            }
             if (event.key === 'Enter' && !event.shiftKey) {
+              if (!mentionHelper.hidden) {
+                const active = mentionHelper.querySelector('button.active') || mentionHelper.querySelector('button[data-agent-name]');
+                if (active && active.dataset.agentName) {
+                  event.preventDefault();
+                  applyMention(active.dataset.agentName);
+                  return;
+                }
+              }
               event.preventDefault();
               if (typeof window.fetch === 'function') {
                 submitPrompt();
@@ -1424,6 +1590,11 @@ def _refresh_script() -> str:
           mentionHelper.addEventListener('click', function(event){
             const target = event.target;
             if (target && target.dataset && target.dataset.agentName) {
+              const buttons = Array.from(mentionHelper.querySelectorAll('button[data-agent-name]'));
+              const idx = buttons.indexOf(target);
+              if (idx >= 0) {
+                setActiveMention(idx);
+              }
               applyMention(target.dataset.agentName);
             }
           });
@@ -1436,6 +1607,7 @@ def _refresh_script() -> str:
           if (promptContainer) {
             promptContainer.classList.remove('mention-visible');
           }
+          mentionActiveIndex = -1;
         }
 
         async function submitPrompt(){
@@ -1492,6 +1664,39 @@ def _refresh_script() -> str:
           } finally {
             sendingPrompt = false;
           }
+        }
+
+        function setActiveMention(index){
+          if (!mentionHelper) return;
+          const buttons = Array.from(mentionHelper.querySelectorAll('button[data-agent-name]'));
+          if (!buttons.length) {
+            mentionActiveIndex = -1;
+            return;
+          }
+          if (index < 0) {
+            index = buttons.length - 1;
+          }
+          if (index >= buttons.length) {
+            index = 0;
+          }
+          mentionActiveIndex = index;
+          buttons.forEach(function(btn, i){
+            if (i === mentionActiveIndex) {
+              btn.classList.add('active');
+              btn.setAttribute('aria-selected', 'true');
+            } else {
+              btn.classList.remove('active');
+              btn.removeAttribute('aria-selected');
+            }
+          });
+        }
+
+        function moveMentionFocus(delta){
+          if (!mentionHelper || mentionHelper.hidden) return;
+          const buttons = mentionHelper.querySelectorAll('button[data-agent-name]');
+          if (!buttons.length) return;
+          const nextIndex = mentionActiveIndex === -1 ? (delta > 0 ? 0 : buttons.length - 1) : mentionActiveIndex + delta;
+          setActiveMention(nextIndex);
         }
 
         function findMentionContext(){
@@ -1566,21 +1771,21 @@ def _refresh_script() -> str:
           });
           mentionHelper.appendChild(frag);
           const buttons = mentionHelper.querySelectorAll('button');
-          buttons.forEach(function(btn, index){
-            if (index === 0) {
-              btn.classList.add('active');
-            } else {
-              btn.classList.remove('active');
-            }
-          });
+          mentionActiveIndex = buttons.length ? 0 : -1;
+          setActiveMention(mentionActiveIndex);
           const areaRect = promptArea.getBoundingClientRect();
           const containerRect = promptContainer ? promptContainer.getBoundingClientRect() : areaRect;
-          const baseTop = areaRect.bottom - containerRect.top;
           const baseLeft = areaRect.left - containerRect.left;
           const gap = 6;
-          const top = baseTop + (promptContainer ? promptContainer.scrollTop : 0) + gap;
           const left = baseLeft + (promptContainer ? promptContainer.scrollLeft : 0) + 4;
           const width = Math.max(150, promptArea.offsetWidth - 8);
+          const height = mentionHelper.offsetHeight || 0;
+          const scrollOffset = promptContainer ? promptContainer.scrollTop : 0;
+          let top = areaRect.top - containerRect.top - height - gap + scrollOffset;
+          if (top < 0) {
+            top = scrollOffset;
+          }
+          mentionHelper.style.bottom = 'auto';
           mentionHelper.style.top = top + 'px';
           mentionHelper.style.left = left + 'px';
           mentionHelper.style.maxWidth = width + 'px';
@@ -1774,7 +1979,13 @@ def _refresh_script() -> str:
               layout.dataset.activeConversation = data.active_conversation || '';
             }
             if (taskStrip && data.tasks_html !== undefined) {
-              taskStrip.innerHTML = data.tasks_html;
+              const newSignature = JSON.stringify(data.tasks_signature || []);
+              const currentSignature = taskStrip.dataset.signature || taskStrip.dataset.taskSignature || '';
+              if (newSignature !== currentSignature) {
+                taskStrip.innerHTML = data.tasks_html;
+                taskStrip.dataset.signature = newSignature;
+                taskStrip.dataset.taskSignature = newSignature;
+              }
             }
             if (data.status) {
               if (workerBadge) {

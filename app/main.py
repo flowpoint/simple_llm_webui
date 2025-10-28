@@ -23,6 +23,7 @@ from .templates import (
     render_task_strip,
     render_settings_page,
     render_help_page,
+    render_task_detail_page,
 )
 
 DATA_DIR = Path("data")
@@ -231,6 +232,15 @@ def _collect_view_state(
     status = _status_context()
     agents = _ensure_agents()
     tasks = task_service.snapshot()
+    task_signature = [
+        [
+            task.id,
+            task.status,
+            task.priority,
+            task.updated_at,
+        ]
+        for task in tasks
+    ]
 
     logger.debug(
         "Collected view state for %s (history=%d entries=%d tasks=%d)",
@@ -252,6 +262,7 @@ def _collect_view_state(
         "status": status,
         "agents": agents,
         "tasks": tasks,
+        "task_signature": task_signature,
     }
 
 
@@ -336,6 +347,7 @@ async def dashboard(request: Request, conversation: Optional[str] = None) -> HTM
         agents=state["agents"],
         tasks=state["tasks"],
         status=state["status"],
+        task_signature=state["task_signature"],
     )
     return HTMLResponse(html)
 
@@ -627,6 +639,17 @@ async def llama_health() -> JSONResponse:
     return JSONResponse({"status": status, "label": label})
 
 
+@app.get("/tasks/{task_id}", response_class=HTMLResponse)
+async def task_detail(task_id: str) -> HTMLResponse:
+    task_service.drain_events()
+    snapshot = task_service.snapshot()
+    for record in snapshot:
+        if record.id == task_id:
+            html = render_task_detail_page(record)
+            return HTMLResponse(html)
+    return HTMLResponse("<h1>Task not found</h1><p>The task may have already completed and been removed.</p>", status_code=status.HTTP_404_NOT_FOUND)
+
+
 @app.get("/state", response_class=JSONResponse)
 async def state_endpoint(conversation: Optional[str] = None) -> JSONResponse:
     state = _collect_view_state(conversation)
@@ -650,6 +673,7 @@ async def state_endpoint(conversation: Optional[str] = None) -> JSONResponse:
         ],
         "entry_ids": state["entry_ids"],
         "last_entry_id": state["last_entry_id"],
+        "tasks_signature": state["task_signature"],
     }
     return JSONResponse(payload)
 
