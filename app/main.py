@@ -481,6 +481,8 @@ async def send_message(
                     "temperature": selected_temp,
                     "context_size": selected_ctx,
                 },
+                "ordering": conversation_store.new_ordering(conversation_id, "system"),
+                "tags": [],
             },
         )
     conversation_store.append_user_message(conversation_id, prompt_text)

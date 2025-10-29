@@ -275,6 +275,10 @@ def render_dashboard(
       border-color: #e2d4ff;
       background: #f5efff;
     }}
+    .message.error {{
+      border-color: #f28b82;
+      background: #fdecea;
+    }}
     .message-header {{
       display: flex;
       justify-content: space-between;
@@ -302,6 +306,25 @@ def render_dashboard(
     }}
     .message-actions .label-actions {{
       margin: 0;
+    }}
+    .message-tags {{
+      display: inline-flex;
+      gap: 0.35rem;
+      margin-left: 0.35rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }}
+    .message-tag {{
+      font-size: 0.65rem;
+      padding: 0.15rem 0.35rem;
+      border-radius: 999px;
+      background: rgba(17, 24, 39, 0.08);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }}
+    .message.error .message-tag {{
+      background: rgba(220, 38, 38, 0.14);
+      color: #9b1c1c;
     }}
     .label-actions {{
       display: flex;
@@ -338,6 +361,13 @@ def render_dashboard(
       border-radius: 4px;
       padding: 0.35rem 0.5rem;
       background: rgba(0,0,0,0.02);
+    }}
+    .error-banner {{
+      padding: 0.45rem 0.55rem;
+      border-left: 3px solid #d14343;
+      background: rgba(209, 67, 67, 0.1);
+      border-radius: 6px;
+      color: #7f1d1d;
     }}
     .reasoning-toggle {{
       padding: 0.2rem 0.55rem;
@@ -886,6 +916,7 @@ def _render_entry(
     entry_id = entry.get("id")
     header_text = f"{role.title()} · {entry.get('timestamp')}"
     reward_html = ""
+    tags = entry.get("tags") or []
     if conversation_id and etype == "completion":
         current_reward = reward_map.get(entry_id)
         reward_html = _render_reward_controls(
@@ -940,6 +971,22 @@ def _render_entry(
             body_parts.append(f"<pre>{text}</pre>")
         if tool_html:
             body_parts.append(tool_html)
+    elif etype == "error":
+        content = entry.get("content") or {}
+        message = escape(str(content.get("message") or "An error occurred."))
+        code = content.get("code")
+        detail = content.get("detail")
+        if code:
+            code_label = escape(str(code))
+        else:
+            code_label = "Error"
+        body_parts.append(f"<div class=\"error-banner\"><strong>{code_label}</strong>: {message}</div>")
+        if detail is not None:
+            try:
+                detail_json = json.dumps(detail, indent=2, default=str)
+            except TypeError:
+                detail_json = str(detail)
+            body_parts.append(f"<pre>{escape(detail_json)}</pre>")
     elif etype == "tool_result":
         content = entry.get("content") or {}
         result = escape(json.dumps(content.get("result"), indent=2, default=str))
@@ -951,10 +998,15 @@ def _render_entry(
         body_text = _format_entry_content(entry.get("content", ""))
         body_parts.append(f"<pre>{escape(body_text)}</pre>")
     classes = f"message {escape(role or 'system')}"
+    if "error" in tags or etype == "error":
+        classes += " error"
     entry_attr = f' data-entry-id="{escape(entry_id)}"' if entry_id else ""
     header_html = (
         f'<header class="message-header"><span class="message-meta">{escape(header_text)}</span>'
     )
+    if tags:
+        tag_html = "".join(f"<span class=\"message-tag\">{escape(str(tag))}</span>" for tag in tags)
+        header_html += f"<span class=\"message-tags\">{tag_html}</span>"
     if actions:
         header_html += f"<div class=\"message-actions\">{''.join(actions)}</div>"
     header_html += "</header>"

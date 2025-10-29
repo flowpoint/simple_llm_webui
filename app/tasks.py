@@ -49,6 +49,65 @@ def _ensure_jsonable(value: Any) -> Any:
         return str(value)
 
 
+def _mark_trailing_completions_overridden(
+    conversation_store: ConversationStore,
+    conversation_id: str,
+    conversation: List[Dict[str, Any]],
+) -> None:
+    trailing_ids: List[str] = []
+    for entry in reversed(conversation):
+        entry_type = entry.get("type")
+        role = entry.get("role")
+        if role == "assistant" and entry_type == "completion":
+            if "overridden" not in (entry.get("tags") or []):
+                trailing_ids.append(entry.get("id"))
+        elif entry_type in {"tag"}:
+            continue
+        elif role == "system" and entry_type == "error":
+            continue
+        else:
+            break
+    trailing_ids = [entry_id for entry_id in trailing_ids if entry_id]
+    if not trailing_ids:
+        return
+    for entry_id in trailing_ids:
+        conversation_store.append_tag(
+            conversation_id,
+            entry_id,
+            ["overridden"],
+            reason="superseded",
+        )
+    trailing_set = set(trailing_ids)
+    for entry in conversation:
+        if entry.get("id") in trailing_set:
+            merged = set(entry.get("tags") or [])
+            merged.add("overridden")
+            entry["tags"] = sorted(merged)
+
+
+def _append_error_entry(
+    conversation_store: ConversationStore,
+    conversation_id: str,
+    message: str,
+    *,
+    code: Optional[str] = None,
+    detail: Optional[Any] = None,
+) -> None:
+    content: Dict[str, Any] = {"message": message}
+    if code:
+        content["code"] = code
+    if detail is not None:
+        content["detail"] = detail
+    entry = {
+        "role": "system",
+        "type": "error",
+        "content": content,
+        "ordering": conversation_store.new_ordering(conversation_id, "system"),
+        "tags": ["error"],
+    }
+    conversation_store.append_entry(conversation_id, entry)
+
+
 class TaskService:
     """
     Coordinates task submission and status tracking between the FastAPI app and the worker process.
@@ -410,6 +469,13 @@ def _build_message_history(
             continue
         if etype == "label":
             continue
+        tags = entry.get("tags") or []
+        if "overridden" in tags:
+            continue
+        if "error" in tags:
+            continue
+        if etype == "error":
+            continue
         if etype == "message":
             messages.append(
                 {"role": entry["role"], "content": entry.get("content", "")}
@@ -545,15 +611,42 @@ def _handle_completion(
         },
     )
     while iterations < max_iterations:
+        _mark_trailing_completions_overridden(conversation_store, conversation_id, conversation)
         messages, _ = _build_message_history(conversation, settings["system_prompt"])
         messages = _normalise_messages(messages)
-        response = llama_client.chat(
-            model=model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=context_size,
-            tools=tools,
-        )
+        if not messages or messages[-1]["role"] != "user":
+            error_message = "Cannot invoke completion without a trailing user prompt."
+            _append_error_entry(
+                conversation_store,
+                conversation_id,
+                error_message,
+                code="invalid_state",
+            )
+            raise LlamaCppError(error_message)
+        try:
+            response = llama_client.chat(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=context_size,
+                tools=tools,
+            )
+        except LlamaCppError as exc:
+            _append_error_entry(
+                conversation_store,
+                conversation_id,
+                str(exc),
+                code="llama_cpp_error",
+            )
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            _append_error_entry(
+                conversation_store,
+                conversation_id,
+                f"Unexpected backend failure: {exc}",
+                code="backend_error",
+            )
+            raise
         choice = (response.get("choices") or [{}])[0]
         assistant_message = choice.get("message") or {}
         text, reasoning, reasoning_content = unpack_assistant_message(assistant_message)
@@ -585,6 +678,8 @@ def _handle_completion(
                 "reasoning_content": reasoning_content,
                 "tool_calls": formatted_calls,
             },
+            "ordering": conversation_store.new_ordering(conversation_id, "receive"),
+            "tags": [],
         }
         conversation_store.append_entry(conversation_id, completion_entry)
         conversation.append(completion_entry)
@@ -609,6 +704,8 @@ def _handle_completion(
                     "arguments": arguments,
                     "result": serialised,
                 },
+                "ordering": conversation_store.new_ordering(conversation_id, "receive"),
+                "tags": [],
             }
             conversation_store.append_entry(conversation_id, tool_entry)
             conversation.append(tool_entry)

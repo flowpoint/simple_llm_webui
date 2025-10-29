@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 from uuid import uuid4
 
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -59,7 +61,6 @@ class ConversationStore:
         context_size: int,
     ) -> str:
         conversation_id = uuid4().hex
-        path = self._conversation_path(conversation_id)
         metadata_entry = {
             "id": uuid4().hex,
             "timestamp": utcnow(),
@@ -72,17 +73,24 @@ class ConversationStore:
                 "temperature": temperature,
                 "context_size": context_size,
             },
+            "ordering": self.new_ordering(conversation_id, "system"),
+            "tags": [],
         }
-        _append_jsonl(path, metadata_entry)
+        self.append_entry(conversation_id, metadata_entry)
         return conversation_id
 
     def _conversation_path(self, conversation_id: str) -> Path:
         return self.root / f"conversation_{conversation_id}.jsonl"
 
     def append_entry(self, conversation_id: str, entry: Dict) -> None:
-        entry.setdefault("id", uuid4().hex)
-        entry.setdefault("timestamp", utcnow())
-        _append_jsonl(self._conversation_path(conversation_id), entry)
+        payload = dict(entry)
+        payload.setdefault("id", uuid4().hex)
+        payload.setdefault("timestamp", utcnow())
+        if "ordering" not in payload:
+            payload["ordering"] = self.new_ordering(conversation_id, payload.get("role") or "system")
+        tags = payload.get("tags") or []
+        payload["tags"] = sorted(set(tags))
+        _append_jsonl(self._conversation_path(conversation_id), payload)
 
     def list_conversations(self) -> List[ConversationMetadata]:
         items: List[ConversationMetadata] = []
@@ -104,19 +112,39 @@ class ConversationStore:
 
     def load_conversation(self, conversation_id: str) -> List[Dict]:
         path = self._conversation_path(conversation_id)
-        return list(_iter_jsonl(path))
+        raw_entries = list(_iter_jsonl(path))
+        entries: List[Dict] = []
+        tag_updates: Dict[str, Set[str]] = defaultdict(set)
+        for record in raw_entries:
+            if record.get("type") == "tag":
+                content = record.get("content") or {}
+                target = content.get("target")
+                tags: Sequence[str] = content.get("tags") or ()
+                action = content.get("action", "add")
+                if target and tags and action == "add":
+                    tag_updates[target].update(tags)
+                continue
+            entries.append(record)
+        for entry in entries:
+            merged: Set[str] = set(entry.get("tags") or [])
+            if entry.get("id") in tag_updates:
+                merged.update(tag_updates[entry["id"]])
+            entry["tags"] = sorted(merged)
+        entries.sort(key=_entry_sort_key)
+        return entries
 
     def append_user_message(self, conversation_id: str, content: str) -> str:
-        message_id = uuid4().hex
+        entry_id = uuid4().hex
         entry = {
-            "id": message_id,
-            "timestamp": utcnow(),
+            "id": entry_id,
             "role": "user",
             "type": "message",
             "content": content,
+            "ordering": self.new_ordering(conversation_id, "send"),
+            "tags": [],
         }
-        _append_jsonl(self._conversation_path(conversation_id), entry)
-        return message_id
+        self.append_entry(conversation_id, entry)
+        return entry_id
 
     def append_label(
         self,
@@ -127,7 +155,6 @@ class ConversationStore:
     ) -> None:
         entry = {
             "id": uuid4().hex,
-            "timestamp": utcnow(),
             "role": "system",
             "type": "label",
             "content": {
@@ -135,8 +162,10 @@ class ConversationStore:
                 "target_type": target_type,
                 "reward": reward,
             },
+            "ordering": self.new_ordering(conversation_id, "system"),
+            "tags": [],
         }
-        _append_jsonl(self._conversation_path(conversation_id), entry)
+        self.append_entry(conversation_id, entry)
 
     def last_message_timestamp(self, conversation_id: str) -> Optional[datetime]:
         messages = self.load_conversation(conversation_id)
@@ -144,6 +173,56 @@ class ConversationStore:
             if entry["type"] in {"message", "tool_call", "tool_result", "reasoning"}:
                 return datetime.strptime(entry["timestamp"], ISO_FORMAT)
         return None
+
+    def new_ordering(self, conversation_id: str, direction: str) -> Dict:
+        return {
+            "direction": direction,
+            "position": time.time_ns(),
+        }
+
+    def append_tag(
+        self,
+        conversation_id: str,
+        target_id: str,
+        tags: Iterable[str],
+        *,
+        reason: Optional[str] = None,
+    ) -> None:
+        unique_tags = {tag for tag in tags if tag}
+        if not unique_tags:
+            return
+        entry = {
+            "role": "system",
+            "type": "tag",
+            "content": {
+                "target": target_id,
+                "tags": sorted(unique_tags),
+                "action": "add",
+                "reason": reason,
+            },
+            "ordering": self.new_ordering(conversation_id, "system"),
+            "tags": [],
+        }
+        self.append_entry(conversation_id, entry)
+
+
+def _entry_sort_key(entry: Dict) -> tuple:
+    ordering = entry.get("ordering") or {}
+    position = ordering.get("position")
+    if position is None:
+        timestamp = entry.get("timestamp")
+        if timestamp:
+            try:
+                position = int(datetime.strptime(timestamp, ISO_FORMAT).timestamp() * 1_000_000_000)
+            except ValueError:
+                position = 0
+        else:
+            position = 0
+    return (
+        position,
+        entry.get("timestamp") or "",
+        entry.get("id") or "",
+    )
 
 
 class IndexStore:
