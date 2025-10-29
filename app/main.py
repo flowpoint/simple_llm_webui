@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
+import time
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -232,15 +233,19 @@ def _collect_view_state(
     status = _status_context()
     agents = _ensure_agents()
     tasks = task_service.snapshot()
-    task_signature = [
-        [
-            task.id,
-            task.status,
-            task.priority,
-            task.updated_at,
-        ]
-        for task in tasks
-    ]
+    current_tick = int(time.time() // 5)
+    task_signature: List[List[Any]] = []
+    for task in tasks:
+        tick_marker = str(current_tick) if task.status == "running" else ""
+        task_signature.append(
+            [
+                task.id,
+                task.status,
+                task.priority,
+                task.updated_at,
+                tick_marker,
+            ]
+        )
 
     logger.debug(
         "Collected view state for %s (history=%d entries=%d tasks=%d)",
@@ -273,30 +278,20 @@ def _render_tasks_html(tasks: List[Any]) -> str:
     recent_completed = completed[:2]
     recent_completed.sort(key=lambda rec: getattr(rec, "created_at", rec.updated_at))
     queued.sort(key=lambda rec: (rec.priority, rec.updated_at))
-    completed_placeholder = (
-        "<div class=\"task-lane completed empty\">"
-        "<div class=\"task-strip\">"
-        "<div class=\"task-card placeholder\"><p>No finished tasks.</p></div>"
-        "</div>"
-        "</div>"
-    )
-    queued_placeholder = (
-        "<div class=\"task-lane queued empty\">"
-        "<div class=\"task-strip\">"
-        "<div class=\"task-card placeholder\"><p>No queued tasks.</p></div>"
-        "</div>"
-        "</div>"
-    )
+    placeholder_completed = "<article class=\"task-card placeholder\"><p>No finished tasks.</p></article>"
+    placeholder_queued = "<article class=\"task-card placeholder\"><p>No queued tasks.</p></article>"
 
     completed_html = render_task_strip(
         recent_completed,
         css_class="completed",
-        empty_html=completed_placeholder,
+        min_slots=2,
+        placeholder_html=placeholder_completed,
     )
     queued_html = render_task_strip(
         queued,
         css_class="queued",
-        empty_html=queued_placeholder,
+        min_slots=1,
+        placeholder_html=placeholder_queued,
     )
 
     parts = [completed_html, "<div class=\"task-divider\"></div>", queued_html]

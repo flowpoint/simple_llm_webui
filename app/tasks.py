@@ -35,6 +35,8 @@ class TaskRecord:
     updated_at: str = field(default_factory=utcnow)
     description: str = ""
     detail: Optional[str] = None
+    agent: Optional[str] = None
+    started_at: Optional[str] = None
 
 
 def _ensure_jsonable(value: Any) -> Any:
@@ -115,6 +117,7 @@ class TaskService:
             conversation_id=conversation_id,
             payload=payload,
             description=f"Generate reply ({agent}{f' · {model}' if model else ''})",
+            agent=agent,
         )
 
     def enqueue_summary(self, conversation_id: str, priority: int = PRIORITY_LOW) -> Optional[str]:
@@ -136,6 +139,7 @@ class TaskService:
         conversation_id: Optional[str],
         payload: Dict[str, Any],
         description: str,
+        agent: Optional[str] = None,
     ) -> str:
         self.start()
         task_id = uuid4().hex
@@ -148,6 +152,7 @@ class TaskService:
             created_at=created,
             updated_at=created,
             description=description,
+            agent=agent,
         )
         self._tasks[task_id] = record
         order = next(self._counter)
@@ -185,8 +190,12 @@ class TaskService:
             if task_id not in self._tasks:
                 continue
             record = self._tasks[task_id]
-            record.status = event.get("status", record.status)
-            record.updated_at = event.get("timestamp", utcnow())
+            status = event.get("status", record.status)
+            timestamp = event.get("timestamp", utcnow())
+            if status == "running" and record.started_at is None:
+                record.started_at = timestamp
+            record.status = status
+            record.updated_at = timestamp
             record.detail = event.get("message")
             extra = event.get("data") or {}
             if extra.get("requires_summary") and record.conversation_id:

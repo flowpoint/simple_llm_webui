@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from html import escape
 from typing import Any, Dict, List, Optional
 
@@ -35,12 +36,20 @@ def render_dashboard(
     completed.sort(key=lambda record: record.updated_at, reverse=True)
     completed = completed[:2]
     queued.sort(key=lambda record: (record.priority, record.updated_at))
+    completed_placeholder = "<article class=\"task-card placeholder\"><p>No finished tasks.</p></article>"
+    queued_placeholder = "<article class=\"task-card placeholder\"><p>No queued tasks.</p></article>"
 
     completed_html = render_task_strip(
-        completed, css_class="completed", empty_html=""
+        completed,
+        css_class="completed",
+        min_slots=2,
+        placeholder_html=completed_placeholder,
     )
     queued_html = render_task_strip(
-        queued, css_class="queued", empty_html=""
+        queued,
+        css_class="queued",
+        min_slots=1,
+        placeholder_html=queued_placeholder,
     )
 
     task_sections: List[str] = []
@@ -50,7 +59,7 @@ def render_dashboard(
         task_sections.append("<div class=\"task-divider\"></div>")
     if queued_html:
         task_sections.append(queued_html)
-    tasks_html = "\n".join(task_sections) or "<div class='empty'>No queued work.</div>"
+    tasks_html = "\n".join(task_sections)
     scripts = _refresh_script()
     active_attr = escape(active_conversation or "")
     title_html = escape(conversation_title or "Conversation")
@@ -488,10 +497,10 @@ def render_dashboard(
     .task-area {{
       display: flex;
       flex-direction: row;
-      gap: 0.4rem;
+      gap: 0.3rem;
       align-items: stretch;
       overflow-x: auto;
-      padding-bottom: 0.25rem;
+      padding-bottom: 0.2rem;
     }}
     .task-lane {{
       display: flex;
@@ -508,24 +517,34 @@ def render_dashboard(
     .task-strip {{
       display: flex;
       flex-direction: row;
-      gap: 0.45rem;
-      flex: 0 0 auto;
-      align-items: stretch;
+      gap: 0.35rem;
+      flex: 1 1 auto;
+      min-width: 0;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: flex-start;
     }}
     .task-lane.completed .task-strip {{
-      max-width: calc(200px * 2 + 0.9rem);
+      flex: 0 0 auto;
+      width: auto;
+      max-width: calc(160px * 2 + 0.7rem);
     }}
     .task-lane.completed.empty {{
-      flex: 0 0 calc(200px * 2 + 0.9rem);
-      max-width: calc(200px * 2 + 0.9rem);
+      flex: 0 0 calc(160px * 2 + 0.7rem);
+      max-width: calc(160px * 2 + 0.7rem);
     }}
     .task-lane.queued.empty {{
       flex: 1 1 auto;
       min-width: 0;
     }}
     .task-lane.empty .task-strip {{
-      justify-content: center;
+      justify-content: flex-start;
       max-width: 100%;
+      width: 100%;
+    }}
+    .task-lane.queued .task-strip {{
+      justify-content: flex-start;
     }}
     .task-divider {{
       flex: 0 0 4px;
@@ -539,19 +558,20 @@ def render_dashboard(
       align-self: stretch;
     }}
     .task-card {{
-      flex: 0 0 200px;
-      max-width: 200px;
+      flex: 0 0 160px;
+      max-width: 160px;
       border: 1px solid var(--border);
       border-radius: 8px;
       background: var(--panel-bg);
-      padding: 0.55rem 0.55rem;
-      font-size: 0.78rem;
+      padding: 0.45rem 0.45rem;
+      font-size: 0.74rem;
       box-shadow: 0 1px 2px rgba(0,0,0,0.05);
       display: flex;
       flex-direction: column;
-      gap: 0.18rem;
+      justify-content: space-between;
+      gap: 0.35rem;
       min-width: 0;
-      min-height: 120px;
+      min-height: 98px;
       margin: 0;
       overflow: hidden;
       box-sizing: border-box;
@@ -565,31 +585,30 @@ def render_dashboard(
     .task-card.running {{
       border-color: #36a536;
     }}
-    .task-card h3 {{
-      margin: 0 0 0.25rem;
-      font-size: 0.82rem;
-      line-height: 1.2;
-      max-height: 2.4em;
-      overflow: hidden;
-      word-break: break-word;
+    .task-card .task-info {{
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      min-height: 0;
     }}
-    .task-card span {{
-      color: var(--muted);
+    .task-line {{
+      margin: 0;
       font-size: 0.7rem;
-      display: block;
+      line-height: 1.2;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }}
-    .task-card p {{
-      margin: 0;
-      font-size: 0.72rem;
-      line-height: 1.25;
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-      word-break: break-word;
+    .task-line--title {{
+      font-weight: 600;
+      color: #202945;
+      font-size: 0.74rem;
+    }}
+    .task-line--status {{
+      color: var(--muted);
+    }}
+    .task-line--agent {{
+      color: #1f2a44;
     }}
     .task-lane.empty .task-card.placeholder {{
       align-items: center;
@@ -600,9 +619,9 @@ def render_dashboard(
       color: var(--muted);
     }}
     .task-card.placeholder {{
-      flex: 0 0 200px;
-      max-width: 200px;
-      min-height: 120px;
+      flex: 0 0 160px;
+      max-width: 160px;
+      min-height: 98px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -633,11 +652,6 @@ def render_dashboard(
     .task-action:hover {{
       background: var(--accent);
       color: #fff;
-    }}
-    .prompt-hint {{
-      margin: 0.35rem 0 0;
-      font-size: 0.75rem;
-      color: var(--muted);
     }}
     .task-details {{
       margin-top: 0.2rem;
@@ -788,16 +802,28 @@ def render_conversation_messages(
 
 
 def render_task_strip(
-    tasks: List[TaskRecord], *, css_class: str = "", empty_html: str = ""
+    tasks: List[TaskRecord],
+    *,
+    css_class: str = "",
+    empty_html: str = "",
+    min_slots: int = 0,
+    placeholder_html: Optional[str] = None,
 ) -> str:
-    if not tasks:
+    cards = [_render_task_card(task) for task in tasks]
+    placeholders_added = False
+    if placeholder_html and min_slots > 0:
+        while len(cards) < min_slots:
+            cards.append(placeholder_html)
+            placeholders_added = True
+    if not cards:
         return empty_html
-    cards = "\n".join(_render_task_card(task) for task in tasks)
     lane_classes = ["task-lane"]
     if css_class:
         lane_classes.append(css_class)
+    if placeholders_added and not tasks:
+        lane_classes.append("empty")
     lane_class_attr = " ".join(lane_classes)
-    return f"<div class=\"{lane_class_attr}\"><div class=\"task-strip\">{cards}</div></div>"
+    return f"<div class=\"{lane_class_attr}\"><div class=\"task-strip\">{''.join(cards)}</div></div>"
 
 
 def _format_entry_content(value: Any) -> str:
@@ -988,13 +1014,6 @@ def render_prompt_form(
         return "<p class='placeholder'>Create a conversation to start chatting.</p>"
     agent_aliases = [agent.get("alias", "") for agent in agents if agent.get("alias")]
     suggestions = escape(json.dumps(agent_aliases))
-    hint = ""
-    if agent_aliases:
-        alias = agent_aliases[0]
-        agent_name = next((agent.get("name") for agent in agents if agent.get("alias") == alias), alias)
-        hint = (
-            f"<p class=\"prompt-hint\">Tip: address <strong>@{escape(alias)}</strong> for {escape(agent_name)} or type @ to choose another agent.</p>"
-        )
     return f"""
     <form method="post" action="/conversation/{conversation_id}/send" class="prompt">
       <div class="mention-helper" id="mention-helper" hidden></div>
@@ -1002,7 +1021,6 @@ def render_prompt_form(
         <textarea name="prompt" placeholder="Type your message… (use @alias to target agents)" required data-agent-names='{suggestions}'></textarea>
         <button type="submit">Send</button>
       </div>
-      {hint}
     </form>
     """
 
@@ -1222,6 +1240,38 @@ def _render_agent_fields(index: int, agent: Dict) -> str:
     """
 
 
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        try:
+            return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            return None
+
+
+def _format_elapsed(start: Optional[str]) -> str:
+    start_dt = _parse_timestamp(start)
+    if not start_dt:
+        return ""
+    delta = datetime.now(timezone.utc) - start_dt
+    total_seconds = int(max(delta.total_seconds(), 0))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+
 def _render_task_card(task: TaskRecord) -> str:
     classes = ["task-card"]
     if task.priority <= 1:
@@ -1234,23 +1284,32 @@ def _render_task_card(task: TaskRecord) -> str:
         classes.append("completed")
     elif task.status == "failed":
         classes.append("failed")
-    title = escape(task.description or task.kind)
-    priority_label = _priority_label(task.priority)
-    status = escape(task.status.title())
-    conversation = escape((task.conversation_id or "—")[:16])
-    updated = escape(task.updated_at)
-    detail_text = "" if task.detail is None else str(task.detail)
-    preview = escape(detail_text[:80] + ("…" if detail_text and len(detail_text) > 80 else "")) if detail_text else ""
+    kind_label = task.kind.replace("_", " ").title()
+    description = (task.description or "").strip()
+    if description and description.lower() != kind_label.lower():
+        title_text = f"{kind_label}: {description}"
+    else:
+        title_text = description or kind_label
+    status_map = {
+        "completed": "Successful",
+        "failed": "Failed",
+        "running": "Running",
+        "queued": "Queued",
+    }
+    status_label = status_map.get(task.status, task.status.title())
+    if task.status == "running":
+        elapsed = _format_elapsed(task.started_at)
+        if elapsed:
+            status_label = f"{status_label} · {elapsed}"
+    agent_label = task.agent or "—"
     detail_link = f"/tasks/{escape(task.id)}"
-    preview_html = f"<p>{preview}</p>" if preview else ""
     return f"""
     <article class="{' '.join(classes)}">
-      <h3>{title}</h3>
-      <span>Priority: {priority_label}</span>
-      <span>Status: {status}</span>
-      <span>Conversation: {conversation}</span>
-      <span>Updated: {updated}</span>
-      {preview_html}
+      <div class="task-info">
+        <p class="task-line task-line--title">{escape(title_text)}</p>
+        <p class="task-line task-line--status">{escape(status_label)}</p>
+        <p class="task-line task-line--agent">Agent: {escape(agent_label)}</p>
+      </div>
       <a class="task-action" href="{detail_link}" target="_blank" rel="noopener">Open details</a>
     </article>
     """
